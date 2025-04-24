@@ -1,3 +1,8 @@
+// Flex Sensor Transmitter Code
+// By: Trevor O'Connell
+// NOTE: Pinky is not actually being used since only 4 ADC pins available. The signal char is sent, but never processsed. 
+// To avoid I2C issues, the analog pin has been remapped to use A3
+
 // Imports
 #include <ArduinoBLE.h>
 #include <Adafruit_GFX.h>
@@ -11,7 +16,7 @@
 #define USER_OUTPUT_IMU_XY false
 
 // === Reset Button ===
-#define RESET_BUTTON_PIN 7 // Digital pin 7
+#define RESET_BUTTON_PIN D7 // Digital pin 7
 
 // === Display Config ===
 #define SCREEN_WIDTH 128
@@ -36,13 +41,13 @@ MPU6050 mpu(Wire);
 
 
 // === IMU Twitch Detection Config ===
-const float TWITCH_DELTA_X = 90.0;
-const float TWITCH_DELTA_Y = 62.0;
-const float RETURN_MARGIN_X = 45.0;
+const float TWITCH_DELTA_X = 62.0;    // X is for Forward/ Backward
+const float TWITCH_DELTA_Y = 62.0;    // Y is for Left / Right Twist
+const float RETURN_MARGIN_X = 50.0;
 const float RETURN_MARGIN_Y = 45.0;
 const unsigned long TWITCH_WINDOW_MS = 275;
 const unsigned long TWITCH_MIN_TIME_MS = 80;
-const float CHAOS_Y_FOR_X = 60.0;
+const float CHAOS_Y_FOR_X = 90.0;
 const float CHAOS_X_FOR_Y = 70.0;
 const unsigned long IMU_COOLDOWN_DURATION_MS = 50;
 unsigned long lastIMUTwitchTime = 0;
@@ -55,8 +60,8 @@ bool twitchXStarted = false;
 bool twitchYStarted = false;
 unsigned long twitchXStartTime = 0;
 unsigned long twitchYStartTime = 0;
+bool isForward = false;
 bool isRightTwitch = false;
-bool isForwardTwitch = false;
 
 // IMU Twitch Output Value
 double imu_x = 0; // IMU
@@ -65,7 +70,7 @@ uint8_t imuTwitchValue = 1; // 1 = normal
 
 
 // === Flex Sensor Config ===
-const int flexPins[5] = {A0, A1, A2, A3, A4}; // Thumb to Pinky
+const int flexPins[5] = {A0, A1, A2, A3, A3}; // Thumb to Pinky, NOTE: Pinky is A3 to not interfere w/ I2C
 
 // === Calibration Storage ===
 int flexBaseline[5];            // Baseline flat-hand value
@@ -78,11 +83,11 @@ int bendThresholds[5][4];       // 4 thresholds for 5 levels
 // const int bendLevel5 = 100;
 
 // === Sensor Values ===
-uint8_t thumbFinger = 0;  // Flex Sensors
-uint8_t pointerFinger = 0;
-uint8_t middleFinger = 0;
-uint8_t ringFinger = 0;
-uint8_t pinkyFinger = 0;
+uint8_t thumbFinger = 1;  // Flex Sensors
+uint8_t pointerFinger = 1;
+uint8_t middleFinger = 1;
+uint8_t ringFinger = 1;
+uint8_t pinkyFinger = 1;
 
 
 // === Timer Config ===
@@ -120,8 +125,10 @@ void setup() {
   display.println("Wait for 5 seconds.");
   display.display();
 
+  delay(50);
+  Serial.println("Booting!");
   Serial.println("Hold your hand flat for 5 seconds.");
-  delay(2000); // wait one second for display, and for user to read
+  delay(4000); // wait one second for display, and for user to read
   
 
   // IMU Init
@@ -221,7 +228,7 @@ void loop() {
   delay(500);
 
   // === Manual Reset Button Check ===
-  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+  if (digitalRead(RESET_BUTTON_PIN)) {
     Serial.println("RESET BUTTON PRESSED - RESTARTING");
     delay(100);  // Debounce
     softwareReset();
@@ -248,6 +255,13 @@ void loop() {
         readSensors(); // Reads, updates, and writes values via BLE. Outputs on Serial if needed
         displayValues(); // Displays sensor classified values on screen
       }
+
+      // === Manual Reset Button Check ===
+      if (digitalRead(RESET_BUTTON_PIN)) {
+        Serial.println("RESET BUTTON PRESSED - RESTARTING");
+        delay(100);  // Debounce
+        softwareReset();
+      }
     }
 
     // After while loop, device disconnected from peripheral
@@ -271,38 +285,71 @@ void loop() {
 
 void calibrateFlexSensors() {
   const int numSamples = 40;
-  int tempSum[5] = {0, 0, 0, 0, 0};
+  int tempSumFlat[5] = {0};
+  int tempSumFlex[5] = {0};
 
-  Serial.println("\n[!] Please hold your hand out FLAT and STILL for 2 seconds...");
-  delay(1000); // wait for hand to stabilize
-
+  // Flat-hand calibration
+  Serial.println("\n[!] Hold hand FLAT and STILL...");
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("Hold hand FLAT");
+  display.println("and STILL...");
+  display.display();
+  delay(2000);
   for (int s = 0; s < numSamples; s++) {
     for (int i = 0; i < 5; i++) {
-      tempSum[i] += analogRead(flexPins[i]);
+      tempSumFlat[i] += analogRead(flexPins[i]);
     }
     delay(50);
   }
 
-  for (int i = 0; i < 5; i++) {
-    flexBaseline[i] = tempSum[i] / numSamples;
-    int base = flexBaseline[i];
-
-    bendThresholds[i][0] = base - 0.40 * base;  // Level 1–2
-    bendThresholds[i][1] = base - 0.625 * base; // Level 2–3
-    bendThresholds[i][2] = base - 0.725 * base; // Level 3–4
-    bendThresholds[i][3] = base - 0.775 * base; // Level 4–5
-
-    if(USER_DEBUG) Serial.print("Finger "); Serial.print(i);
-    if(USER_DEBUG) Serial.print(" | Baseline: "); Serial.print(base);
-    if(USER_DEBUG) Serial.print(" | Thresholds: ");
-    for (int j = 0; j < 4; j++) {
-      if(USER_DEBUG) Serial.print(bendThresholds[i][j]); Serial.print(" ");
+  // Flex-hand calibration
+  Serial.println("\n[!] FULLY FLEX your hand and HOLD...");
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("FULLY FLEX hand");
+  display.println("and HOLD...");
+  display.display();
+  delay(2000);
+  for (int s = 0; s < numSamples; s++) {
+    for (int i = 0; i < 5; i++) {
+      tempSumFlex[i] += analogRead(flexPins[i]);
     }
-    if(USER_DEBUG) Serial.println();
+    delay(50);
   }
 
-  if(USER_DEBUG) Serial.println("\n[✓] Flex Calibration complete!\n");
+  // Set thresholds individually per finger
+  for (int i = 0; i < 5; i++) {
+    flexBaseline[i] = tempSumFlat[i] / numSamples;
+    int flexMax = tempSumFlex[i] / numSamples;
+
+    int delta = flexBaseline[i] - flexMax;
+
+    bendThresholds[i][0] = flexBaseline[i] - delta * 0.45;  // Level 1–2 threshold
+    bendThresholds[i][1] = flexBaseline[i] - delta * 0.60;  // Level 2–3 threshold
+    bendThresholds[i][2] = flexBaseline[i] - delta * 0.80;  // Level 3–4 threshold
+    bendThresholds[i][3] = flexBaseline[i] - delta * 0.975;  // Level 4–5 threshold (10% above max flex)
+
+    if(USER_DEBUG) {
+      Serial.print("Finger "); Serial.print(i);
+      Serial.print(" | Flat: "); Serial.print(flexBaseline[i]);
+      Serial.print(" | FlexMax: "); Serial.print(flexMax);
+      Serial.print(" | Thresholds: ");
+      for (int j = 0; j < 4; j++) {
+        Serial.print(bendThresholds[i][j]); Serial.print(" ");
+      }
+      Serial.println();
+    }
+  }
+
+  Serial.println("\n[✓] Calibration complete!\n");
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("Calibration Done!");
+  display.display();
+  delay(1000);
 }
+
 
 
 
@@ -319,7 +366,8 @@ void readSensors() {
   pointerFinger = classifyFingerPosition(flexValues[1], 1);
   middleFinger = classifyFingerPosition(flexValues[2], 2);
   ringFinger = classifyFingerPosition(flexValues[3], 3);
-  pinkyFinger = classifyFingerPosition(flexValues[4], 4);
+  // pinkyFinger = classifyFingerPosition(flexValues[4], 4);
+  pinkyFinger = 1; // Write 1 to avoid issues w/ I2C
 
   // Retrieving X and Y angles from IMU
   imu_x = mpu.getAngleX();
@@ -342,7 +390,7 @@ void readSensors() {
     Serial.print(" I:"); Serial.print(pointerFinger);
     Serial.print(" M:"); Serial.print(middleFinger);
     Serial.print(" R:"); Serial.print(ringFinger);
-    Serial.print(" P:"); Serial.print(pinkyFinger);
+    //Serial.print(" P:"); Serial.print(pinkyFinger); // REMOVED BC I2C
     Serial.print(" IMU:"); Serial.print(imuTwitchValue);
 
     if (USER_OUTPUT_IMU_XY) {
@@ -374,12 +422,12 @@ void updateIMUTwitchStatus() {
 
   bool twitchDetected = false; // New flag to track if we saw one this cycle
 
-  // === X-axis (left/right twist) detection ===
+  // === X-axis (forward or backward) detection ===
   static float peakDeltaX = 0;
   if (!twitchXStarted && abs(deltaX) >= TWITCH_DELTA_X && abs(deltaY) <= CHAOS_Y_FOR_X) {
     twitchXStarted = true;
     twitchXStartTime = now;
-    isRightTwitch = (deltaX > 0);
+    isForward = (deltaX > 0);
     peakDeltaX = deltaX;
   }
 
@@ -389,7 +437,7 @@ void updateIMUTwitchStatus() {
     if (abs(deltaX) <= RETURN_MARGIN_X) {
       unsigned long duration = now - twitchXStartTime;
       if (duration >= TWITCH_MIN_TIME_MS && duration <= TWITCH_WINDOW_MS) {
-        imuTwitchValue = isRightTwitch ? 2 : 3;
+        imuTwitchValue = isForward ? 2 : 3;
         lastIMUTwitchTime = now;
         twitchDetected = true;
       }
@@ -398,12 +446,12 @@ void updateIMUTwitchStatus() {
     if (now - twitchXStartTime > TWITCH_WINDOW_MS) twitchXStarted = false;
   }
 
-  // === Y-axis (forward/backward twitch) detection ===
+  // === Y-axis (left twist or right twist twitch) detection ===
   static float peakDeltaY = 0;
   if (!twitchYStarted && abs(deltaY) >= TWITCH_DELTA_Y && abs(deltaX) <= CHAOS_X_FOR_Y) {
     twitchYStarted = true;
     twitchYStartTime = now;
-    isForwardTwitch = (deltaY > 0);
+    isRightTwitch = (deltaY > 0);
     peakDeltaY = deltaY;
   }
 
@@ -413,7 +461,7 @@ void updateIMUTwitchStatus() {
     if (abs(deltaY) <= RETURN_MARGIN_Y) {
       unsigned long duration = now - twitchYStartTime;
       if (duration >= TWITCH_MIN_TIME_MS && duration <= TWITCH_WINDOW_MS) {
-        imuTwitchValue = isForwardTwitch ? 4 : 5;
+        imuTwitchValue = isRightTwitch ? 4 : 5;
         lastIMUTwitchTime = now;
         twitchDetected = true;
       }
@@ -448,8 +496,9 @@ void displayValues() {
   display.println(middleFinger);
   display.print("Ring: ");
   display.println(ringFinger);
-  display.print("Pinky: ");
-  display.println(pinkyFinger);
+  // REMOVED PINKY BC I2C
+  //display.print("Pinky: ");
+  //display.println(pinkyFinger);
   display.print("IMU: ");
   display.println(imuTwitchValue);
   display.display();
