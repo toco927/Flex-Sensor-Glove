@@ -1,3 +1,7 @@
+// Flex Sensor Reciever Code
+// By: Trevor O'Connell
+// NOTE: Pinky is not actually being used since only 4 ADC pins available. The signal char is sent, but never processsed. 
+
 // Imports
 #include <ArduinoBLE.h>
 #include <Adafruit_GFX.h>
@@ -215,6 +219,7 @@ void connectAndRead(BLEDevice peripheral) {
     }
 
     if (pinkyChar.valueUpdated()) {
+      // This should always be 1
       valuesUpdated = true;
       byte pinkyValue;
       pinkyChar.readValue(pinkyValue);
@@ -233,7 +238,7 @@ void connectAndRead(BLEDevice peripheral) {
       verifyOutputs(sensors);
       if (USER_OUTPUT_SERIAL) printOutputs(sensors);
 
-      //process fingers
+      // process fingers
       // Process finger FSM
       for (int i = 0; i < 5; i++) {
         processFinger(i, sensors[i]);
@@ -314,31 +319,77 @@ void processIMU(uint8_t value) {
 void triggerFingerAction(uint8_t index, uint8_t level) {
   String fingerNames[5] = {"Thumb", "Pointer", "Middle", "Ring", "Pinky"};
   String label = fingerNames[index] + ": " + String(level);
-  Serial.println(label);
+
+  if (level >= 2 && level <= 4) {
+    // Medium Flex (2-4)
+    switch (index) {
+      case 0: // Thumb medium flex: volume down
+        Keyboard.media_control(KEY_PLAY_PAUSE);
+        label += " Play/Pause";
+        break;
+      case 1: // Pointer medium flex: volume up
+        Keyboard.media_control(KEY_VOLUME_DOWN);
+        label += " Vol Down";
+        break;
+      case 2: // Middle medium flex: media stop
+        Keyboard.media_control(KEY_VOLUME_UP);
+        label += " Vol Up";
+        break;
+      case 3: // Ring medium flex: previous song
+        Keyboard.media_control(KEY_PREVIOUS_TRACK);
+        label += " Prev Song";
+        break;
+      case 4: // Pinky (Unused)
+        break;
+    }
+  } else if (level == 5) {
+    // Full Flex (5)
+    switch (index) {
+      case 0: // Thumb full flex: play/pause
+        Keyboard.media_control(KEY_PLAY_PAUSE);
+        label += " Play/Pause";
+        break;
+      case 1: // Pointer full flex: next song
+        Keyboard.media_control(KEY_NEXT_TRACK);
+        label += " Next Song";
+        break;
+      case 2: // Middle full flex: mute/unmute
+        Keyboard.media_control(KEY_MUTE);
+        label += " Mute Toggle";
+        break;
+      case 3: // Ring full flex: lock computer (Win+L)
+        Keyboard.key_code('l', KEY_LOGO);
+        label += " Lock PC";
+        break;
+      case 4: // Pinky (Unused)
+        break;
+    }
+  }
+
+  if (USER_DEBUG) Serial.println(label);
   updateDisplay(label);
-  
-  delay(10); // mimic keypress timing
-  // You could add Keyboard functionality here too if you want.
 }
 
 void triggerIMUAction(uint8_t value) {
   String label = "IMU: ";
   switch (value) {
-    case 2: // Right twitch
-      Keyboard.media_control(KEY_VOLUME_UP);
-      label += "Volume Up";
+    case 1: // Normal
+      return; // No action
+    case 2: // Forward twitch: Caps Lock Toggle
+      Keyboard.key_code(KEY_CAPS_LOCK);
+      label += "Caps Lock";
       break;
-    case 3: // Left twitch
-      Keyboard.media_control(KEY_VOLUME_DOWN);
-      label += "Volume Down";
+    case 3: // Backward twitch: Windows key
+      Keyboard.key_code(KEY_LOGO);
+      label += "Win Key";
       break;
-    case 4: // Forward twitch
-      Keyboard.media_control(KEY_MUTE);
-      label += "Mute Toggle";
+    case 4: // Right rotate: Up Arrow
+      Keyboard.key_code(UP_ARROW);
+      label += "Up Arrow";
       break;
-    case 5: // Backward twitch
-      Keyboard.media_control(KEY_NEXT_TRACK);
-      label += "Next Song";
+    case 5: // Left rotate: Down Arrow
+      Keyboard.key_code(DOWN_ARROW);
+      label += "Down Arrow";
       break;
     default:
       return; // Ignore invalid values
@@ -347,6 +398,7 @@ void triggerIMUAction(uint8_t value) {
   Serial.println(label);
   updateDisplay(label);
 }
+
 
 void updateDisplay(const String &line2) {
   display.clearDisplay();
@@ -358,8 +410,6 @@ void updateDisplay(const String &line2) {
   display.println(line2);
   display.display();
 }
-
-
 
 
 void printOutputs(int sensors[]) {
